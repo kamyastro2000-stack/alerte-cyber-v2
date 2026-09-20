@@ -5,40 +5,38 @@ from threading import Thread
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+import google.generativeai as genai
 
 # --- CONFIGURATION ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+GEMINI_KEY = os.environ.get("GEMINI_KEY")  # La clé API Google
 
-# Setup Flask pour empêcher Render d'endormir le bot
+# Config IA
+genai.configure(api_key=GEMINI_KEY)
+model = genai.GenerativeModel('gemini-pro')
+
+# Setup Flask
 app = Flask(__name__)
 
 
 @app.route('/')
 def home():
-    return "Le bot Alerte Cyber V2 est en vie ! 🚀"
+    return "SentineL V3 est Active ⚡"
 
 
 def run_flask():
-    # Render définit le port dynamiquement
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
 
-# --- LOGIQUE DU BOT ---
+# --- SOURCES DE RENSEIGNEMENT ---
 SOURCES = {
-    "FR": {
-        "ANSSI": "https://www.ssi.gouv.fr/actualites/flux-rss/",
-        "Cyberveille": "https://cyberveille.fr/feed/",
-        "Zataz": "https://www.zataz.com/feed/"
-    },
-    "EN": {
-        "The Hacker News": "https://feeds.feedburner.com/TheHackersNews",
-        "BleepingComputer": "https://www.bleepingcomputer.com/feed/",
-        "Cybersecurity News": "https://cybersecuritynews.com/feed/",
-        "Reddit CyberSecurity": "https://www.reddit.com/r/cybersecurity/.rss",
-    }
+    "NEWS_FR": "https://cyberveille.fr/feed/",
+    "NEWS_EN": "https://feeds.feedburner.com/TheHackersNews",
+    "CVE_CRITICAL": "https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss.xml"  # Flux officiel des failles
 }
+
 DB_FILE = "sent_articles.txt"
 logging.basicConfig(level=logging.INFO)
 
@@ -55,53 +53,101 @@ def save_sent_article(link):
         f.write(link + "\n")
 
 
-async def check_for_news(context: ContextTypes.DEFAULT_TYPE):
-    sent_articles = load_sent_articles()
-    count = 0
-    for lang, sources in SOURCES.items():
-        emoji_lang = "🇫🇷" if lang == "FR" else "🇬🇧"
-        for source_name, url in sources.items():
-            try:
-                feed = feedparser.parse(url)
-                for entry in feed.entries[:3]:
-                    link = entry.link
-                    if link not in sent_articles:
-                        msg = (
-                            f"{emoji_lang} *ALERTE CYBER {lang}* 🚨\n\n"
-                            f"📰 *{entry.title}*\n\n"
-                            f"🔗 [Lire]({link})\n\n"
-                            f"🎯 {source_name}"
-                        )
-                        await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-                        save_sent_article(link)
-                        sent_articles.add(link)
-                        count += 1
-            except Exception as e:
-                print(f"Erreur {source_name}: {e}")
-    print(f"Scan terminé. {count} news envoyées.")
+# --- FONCTION IA : ANALYSEUR ---
+async def analyze_with_ai(text):
+    try:
+        prompt = (
+            "Analyse cet article de cybersécurité et donne-moi un résumé "
+            "ultra-concis (2 phrases max) avec l'impact réel et le niveau "
+            "de danger (Critique/Haut/Moyen). Sois technique et direct. "
+            f"Texte: {text}"
+        )
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"Analyse IA indisponible : {e}"
 
 
+# --- COMMANDES PRÉCISES ---
+
+# 1. /radar : Scan des failles CVE critiques
+async def radar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🎯 *Lancement du Radar CVE...* Recherche de failles critiques en cours.")
+    feed = feedparser.parse(SOURCES["CVE_CRITICAL"])
+    found = 0
+    for entry in feed.entries[:10]:
+        if "CRITICAL" in entry.title.upper() or "HIGH" in entry.title.upper():
+            msg = f"⚠️ *FAILLE DÉTECTÉE* ⚠️\n\n📛 *{entry.title}*\n\n🔗 [Détails NIST]({entry.link})"
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            found += 1
+    if found == 0:
+        await update.message.reply_text("✅ Aucune faille critique immédiate détectée dans le flux NIST.")
+
+
+# 2. /brief : Résumé IA des dernières news
+async def brief_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🧠 *L'IA analyse les dernières news...* Patientez.")
+    feed = feedparser.parse(SOURCES["NEWS_EN"])
+    top_article = feed.entries[0]
+    summary = await analyze_with_ai(top_article.title + " " + top_article.summary)
+    msg = f"💎 *BRIEFING IA* 💎\n\n📰 *{top_article.title}*\n\n🤖 *Analyse :* {summary}\n\n🔗 [Source]({top_article.link})"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+# 3. /info : Scan classique FR/EN
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Scan manuel lancé...")
-    await check_for_news(context)
-    await update.message.reply_text("✅ Terminé !")
+    await update.message.reply_text("🔍 Scan classique lancé...")
+    sent_articles = load_sent_articles()
+    for name, url in SOURCES.items():
+        if "CVE" in name:
+            continue  # On ignore les CVE ici
+        feed = feedparser.parse(url)
+        for entry in feed.entries[:3]:
+            if entry.link not in sent_articles:
+                msg = f"🚨 *NEWS CYBER* 🚨\n\n📰 *{entry.title}*\n\n🔗 [Lire]({entry.link})"
+                await update.message.reply_text(msg, parse_mode="Markdown")
+                save_sent_article(entry.link)
+    await update.message.reply_text("✅ Terminé.")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Alerte Cyber V2 active ! Tape /info pour des news.")
+    help_text = (
+        "🌐 *SentineL V3 - Intelligence Cyber*\n\n"
+        "👉 /radar : Scan des failles CVE critiques (Technique)\n"
+        "👉 /brief : Analyse IA de la news majeure (Résumé)\n"
+        "👉 /info : Flux classique FR/EN\n"
+        "👉 /start : Menu"
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+
+# --- SCAN AUTOMATIQUE (planificateur) ---
+async def scheduled_scan(context: ContextTypes.DEFAULT_TYPE):
+    sent_articles = load_sent_articles()
+    for name, url in SOURCES.items():
+        if "CVE" in name:
+            continue
+        feed = feedparser.parse(url)
+        for entry in feed.entries[:3]:
+            if entry.link not in sent_articles:
+                msg = f"🚨 *NEWS CYBER* 🚨\n\n📰 *{entry.title}*\n\n🔗 [Lire]({entry.link})"
+                await context.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+                save_sent_article(entry.link)
+                sent_articles.add(entry.link)
 
 
 if __name__ == "__main__":
-    # Lancer Flask dans un thread séparé pour ne pas bloquer le bot
     t = Thread(target=run_flask)
     t.start()
 
     application = ApplicationBuilder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("radar", radar_command))
+    application.add_handler(CommandHandler("brief", brief_command))
     application.add_handler(CommandHandler("info", info_command))
 
-    job_queue = application.job_queue
-    job_queue.run_repeating(check_for_news, interval=21600, first=10)
+    # Auto-scan toutes les 6h
+    application.job_queue.run_repeating(scheduled_scan, interval=21600, first=10)
 
-    print("Bot et serveur web lancés !")
+    print("SentineL V3 Lancé avec IA !")
     application.run_polling()
