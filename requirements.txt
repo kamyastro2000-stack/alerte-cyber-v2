@@ -2,3 +2,4 @@ python-telegram-bot
 feedparser
 requests
 apscheduler
+flask
