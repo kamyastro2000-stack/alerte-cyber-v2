@@ -1,6 +1,8 @@
 import os
 import logging
 import feedparser
+from threading import Thread
+from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 
@@ -8,6 +10,22 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
+# Setup Flask pour empêcher Render d'endormir le bot
+app = Flask(__name__)
+
+
+@app.route('/')
+def home():
+    return "Le bot Alerte Cyber V2 est en vie ! 🚀"
+
+
+def run_flask():
+    # Render définit le port dynamiquement
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+
+# --- LOGIQUE DU BOT ---
 SOURCES = {
     "FR": {
         "ANSSI": "https://www.ssi.gouv.fr/actualites/flux-rss/",
@@ -21,14 +39,8 @@ SOURCES = {
         "Reddit CyberSecurity": "https://www.reddit.com/r/cybersecurity/.rss",
     }
 }
-
 DB_FILE = "sent_articles.txt"
-
-# Logs pour voir ce qui se passe sur Render
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 
 
 def load_sent_articles():
@@ -44,10 +56,8 @@ def save_sent_article(link):
 
 
 async def check_for_news(context: ContextTypes.DEFAULT_TYPE):
-    print("Scan automatique en cours...")
     sent_articles = load_sent_articles()
     count = 0
-
     for lang, sources in SOURCES.items():
         emoji_lang = "🇫🇷" if lang == "FR" else "🇬🇧"
         for source_name, url in sources.items():
@@ -56,10 +66,9 @@ async def check_for_news(context: ContextTypes.DEFAULT_TYPE):
                 for entry in feed.entries[:3]:
                     link = entry.link
                     if link not in sent_articles:
-                        title = entry.title
                         msg = (
                             f"{emoji_lang} *ALERTE CYBER {lang}* 🚨\n\n"
-                            f"📰 *{title}*\n\n"
+                            f"📰 *{entry.title}*\n\n"
                             f"🔗 [Lire]({link})\n\n"
                             f"🎯 {source_name}"
                         )
@@ -73,29 +82,26 @@ async def check_for_news(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 *Lancement d'un scan manuel...* Patientez quelques secondes.")
+    await update.message.reply_text("🔍 Scan manuel lancé...")
     await check_for_news(context)
-    await update.message.reply_text("✅ Scan terminé !")
+    await update.message.reply_text("✅ Terminé !")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Salut ! Je suis ton Alerte Cyber V2.\n\n"
-        "📡 Je t'envoie des news auto.\n"
-        "💡 Tape /info pour forcer un scan maintenant !"
-    )
+    await update.message.reply_text("👋 Alerte Cyber V2 active ! Tape /info pour des news.")
 
 
 if __name__ == "__main__":
-    application = ApplicationBuilder().token(TOKEN).build()
+    # Lancer Flask dans un thread séparé pour ne pas bloquer le bot
+    t = Thread(target=run_flask)
+    t.start()
 
-    # Commandes
+    application = ApplicationBuilder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("info", info_command))
 
-    # Planificateur automatique (toutes les 6 heures)
     job_queue = application.job_queue
-    job_queue.run_repeating(check_for_news, interval=6 * 3600, first=10)
+    job_queue.run_repeating(check_for_news, interval=21600, first=10)
 
-    print("Bot démarré...")
+    print("Bot et serveur web lancés !")
     application.run_polling()
